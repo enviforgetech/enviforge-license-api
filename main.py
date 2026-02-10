@@ -156,12 +156,11 @@ def validate(req: ValidateRequest):
 # =========================
 @app.post("/activate")
 def activate(req: ActivateRequest):
-    """
-    Mantive seu endpoint, mas padronizei pra JSON no body.
-    (Fica mais fácil pro app.)
-    """
+    lic = _make_license(machine_id=req.machine_id, product="vmpt", days=365)
+
     return {
         "status": "activated",
         "machine_id": req.machine_id,
-        "license": req.license_key
+        "license": lic
     }
+
