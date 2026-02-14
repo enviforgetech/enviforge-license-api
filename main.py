@@ -32,19 +32,32 @@ def _save_trials(data: dict) -> None:
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-def _parse_iso_dt(dt_iso: str) -> datetime:
-    dt = datetime.fromisoformat(dt_iso)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
-
-def _is_expired(expires_at_iso: str) -> bool:
+def _parse_dt(ts: str | None) -> datetime | None:
+    if not ts:
+        return None
     try:
-        exp = _parse_iso_dt(expires_at_iso)
-        return _utcnow() > exp
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except Exception:
-        # Se corromper, trate como expirado (mais seguro)
-        return True
+        return None
+
+# =========================
+# Owner IDs (via env var)
+# =========================
+OWNER_MIDS_RAW = os.getenv("ENVIFORGE_OWNER_MIDS", "").strip()
+
+def _owner_set() -> set[str]:
+    if not OWNER_MIDS_RAW:
+        return set()
+    items = [x.strip() for x in OWNER_MIDS_RAW.split(",")]
+    return {x for x in items if x}
+
+def _is_owner(machine_id: str) -> bool:
+    return machine_id.strip() in _owner_set()
+
+OWNER_DAYS = 365 * 20  # 20 anos (aprox) = 7300 dias
 
 # =========================
 # Admin (RESET TRIAL) - protegido por token
@@ -119,6 +132,27 @@ def _parse_license(license_text: str) -> dict:
 
     return {"product": product, "machine_id": machine_id, "exp": exp, "token": token}
 
+def _record_and_return(trials: dict, machine_id: str, product: str, lic: str, plan: str, license_type: str):
+    parsed = _parse_license(lic)
+    trials[machine_id] = {
+        "product": product,
+        "license": lic,
+        "issued_at": trials.get(machine_id, {}).get("issued_at") or _utcnow().isoformat(),
+        "expires_at": parsed["exp"].isoformat(),
+        "plan": plan,
+        "license_type": license_type,
+    }
+    _save_trials(trials)
+
+    return {
+        "license": lic,
+        "expires_at": parsed["exp"].isoformat(),
+        "machine_id": machine_id,
+        "product": product,
+        "plan": plan,
+        "license_type": license_type,
+    }
+
 # =========================
 # Health
 # =========================
@@ -127,128 +161,119 @@ def root():
     return {"ok": True}
 
 # =========================
-# Trial 30 dias (IDEMPOTENTE quando ainda válido)
+# Trial 30 dias (idempotente) + Owner 20 anos
 # =========================
 @app.post("/trial")
 def trial(req: TrialRequest):
     """
-    Gera licença de teste grátis 30 dias.
-
-    Regras:
-    - 1 trial por machine_id.
-    - Se já existe e AINDA está válido: retorna novamente a MESMA licença (idempotente).
-    - Se já existe e já expirou: retorna conflito (não reinicia 30 dias).
+    Trial 30 dias:
+    - Se já existe trial e ainda NÃO expirou: retorna o mesmo (idempotente).
+    - Se já existe mas expirou: retorna 409 trial_used.
+    Owner (ENVIFORGE_OWNER_MIDS):
+    - Retorna licença de 20 anos (não consome trial).
     """
     trials = _load_trials()
 
-    if req.machine_id in trials:
-        existing = trials[req.machine_id]
+    # Owner sempre ganha 20 anos
+    if _is_owner(req.machine_id):
+        existing = trials.get(req.machine_id) or {}
+        lic = existing.get("license")
+        exp_iso = existing.get("expires_at")
+        exp_dt = _parse_dt(exp_iso)
 
-        # Se o product não bater, devolve erro (segurança básica)
-        if existing.get("product") != req.product:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "message": "Produto não confere para este machine_id.",
-                    "issued_at": existing.get("issued_at"),
-                    "expires_at": existing.get("expires_at"),
-                },
-            )
-
-        expires_at = existing.get("expires_at", "")
-        if expires_at and not _is_expired(expires_at):
-            # ✅ Idempotente: devolve o mesmo trial ainda válido
+        # Se já tem licença owner válida, reaproveita. Senão, emite de novo.
+        if lic and exp_dt and _utcnow() <= exp_dt:
             return {
-                "license": existing.get("license"),
-                "expires_at": expires_at,
+                "license": lic,
+                "expires_at": exp_dt.isoformat(),
                 "machine_id": req.machine_id,
                 "product": req.product,
-                "reissued": True,
+                "plan": existing.get("plan") or "owner",
+                "license_type": existing.get("license_type") or "owner",
             }
 
-        # ❌ Trial já expirou: não reemite
+        lic = _make_license(machine_id=req.machine_id, product=req.product, days=OWNER_DAYS)
+        return _record_and_return(trials, req.machine_id, req.product, lic, plan="owner", license_type="owner")
+
+    # Trial normal
+    if req.machine_id in trials:
+        existing = trials[req.machine_id]
+        exp_dt = _parse_dt(existing.get("expires_at"))
+
+        # se por algum motivo não tem exp válida, trata como usado
+        if not exp_dt:
+            raise HTTPException(
+                status_code=409,
+                detail={"message": "Teste grátis já utilizado nesta máquina.", "expires_at": existing.get("expires_at")},
+            )
+
+        # idempotente se ainda válido
+        if _utcnow() <= exp_dt:
+            return {
+                "license": existing.get("license"),
+                "expires_at": exp_dt.isoformat(),
+                "machine_id": req.machine_id,
+                "product": existing.get("product") or req.product,
+                "plan": existing.get("plan") or "trial",
+                "license_type": existing.get("license_type") or "trial",
+            }
+
+        # expirou -> trial usado
         raise HTTPException(
             status_code=409,
             detail={
-                "message": "Teste grátis já expirou nesta máquina.",
+                "message": "Teste grátis já utilizado nesta máquina.",
                 "issued_at": existing.get("issued_at"),
                 "expires_at": existing.get("expires_at"),
-                "reason": "trial_expired",
             },
         )
 
-    # Não existia -> emite trial novo
     lic = _make_license(machine_id=req.machine_id, product=req.product, days=30)
-    parsed = _parse_license(lic)
-
-    trials[req.machine_id] = {
-        "product": req.product,
-        "license": lic,
-        "issued_at": _utcnow().isoformat(),
-        "expires_at": parsed["exp"].isoformat(),
-    }
-    _save_trials(trials)
-
-    return {
-        "license": lic,
-        "expires_at": parsed["exp"].isoformat(),
-        "machine_id": req.machine_id,
-        "product": req.product,
-        "reissued": False,
-    }
+    return _record_and_return(trials, req.machine_id, req.product, lic, plan="trial", license_type="trial")
 
 # =========================
-# Recover License (fonte da verdade)
+# Recover (recuperar licença desta máquina)
 # =========================
 @app.post("/recover_license")
 def recover_license(req: RecoverRequest):
     """
-    Recupera a licença existente desta máquina (sem resetar contagem).
-
-    Comportamento:
-    - Se houver trial válido para machine_id: devolve ok=True + payload de licença.
-    - Se trial existe mas expirou: ok=False + reason=trial_expired.
-    - Se não existe: ok=False + reason=not_found.
+    Recupera a licença já emitida para este machine_id, se ainda estiver válida.
+    - Owner: garante 20 anos (idempotente).
+    - Trial: se ainda válido, devolve; se expirado, informa.
     """
     trials = _load_trials()
 
-    if req.machine_id not in trials:
-        return {"ok": False, "reason": "not_found", "message": "Nenhuma licença encontrada para esta máquina."}
+    # Owner: usa /trial (mesma lógica) de forma segura
+    if _is_owner(req.machine_id):
+        # reaproveita lógica do /trial
+        return trial(TrialRequest(machine_id=req.machine_id, product=req.product))
 
-    existing = trials[req.machine_id]
+    existing = trials.get(req.machine_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail={"message": "Nenhuma licença encontrada para esta máquina."})
 
-    if existing.get("product") != req.product:
-        return {
-            "ok": False,
-            "reason": "product_mismatch",
-            "message": "Produto não confere para este machine_id.",
-            "issued_at": existing.get("issued_at"),
-            "expires_at": existing.get("expires_at"),
-        }
+    exp_dt = _parse_dt(existing.get("expires_at"))
+    if not exp_dt:
+        raise HTTPException(status_code=403, detail={"message": "Registro de licença inválido no servidor."})
 
-    expires_at = existing.get("expires_at", "")
-    if not expires_at or _is_expired(expires_at):
-        return {
-            "ok": False,
-            "reason": "trial_expired",
-            "message": "Teste grátis já expirou nesta máquina.",
-            "issued_at": existing.get("issued_at"),
-            "expires_at": existing.get("expires_at"),
-        }
+    if _utcnow() > exp_dt:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": "Licença expirada.",
+                "expires_at": existing.get("expires_at"),
+                "plan": existing.get("plan") or "trial",
+                "license_type": existing.get("license_type") or "trial",
+            },
+        )
 
-    # Trial válido -> retorna licença atual
     return {
-        "ok": True,
-        "license": {
-            "license_key": existing.get("license"),
-            "status": "active",
-            "plan": "trial",
-            "expires_at": existing.get("expires_at"),
-            "issued_at": existing.get("issued_at"),
-            "validated_at": _utcnow().isoformat(),
-        },
+        "license": existing.get("license"),
+        "expires_at": exp_dt.isoformat(),
         "machine_id": req.machine_id,
-        "product": req.product,
+        "product": existing.get("product") or req.product,
+        "plan": existing.get("plan") or "trial",
+        "license_type": existing.get("license_type") or "trial",
     }
 
 # =========================
@@ -258,6 +283,7 @@ def recover_license(req: RecoverRequest):
 def validate(req: ValidateRequest):
     """
     Valida formato + expiração + se a licença pertence à máquina informada.
+    Retorna também 'plan' e 'license_type' quando possível (servidor sabe quando a licença bate com o registro).
     """
     try:
         parsed = _parse_license(req.license)
@@ -276,7 +302,30 @@ def validate(req: ValidateRequest):
             detail={"message": "Licença expirada.", "expires_at": parsed["exp"].isoformat()},
         )
 
-    return {"status": "valid", "machine_id": req.machine_id, "expires_at": parsed["exp"].isoformat()}
+    # tenta inferir plan/license_type pelo registro (se existir e bater exatamente)
+    plan = None
+    license_type = None
+    try:
+        trials = _load_trials()
+        rec = trials.get(req.machine_id) or {}
+        if rec.get("license") == req.license:
+            plan = rec.get("plan")
+            license_type = rec.get("license_type")
+    except Exception:
+        pass
+
+    # fallback: se é owner por env var, marca como owner
+    if not plan and _is_owner(req.machine_id):
+        plan = "owner"
+        license_type = "owner"
+
+    return {
+        "status": "valid",
+        "machine_id": req.machine_id,
+        "expires_at": parsed["exp"].isoformat(),
+        "plan": plan,
+        "license_type": license_type,
+    }
 
 # =========================
 # Admin: resetar trial de um machine_id (uso interno)
