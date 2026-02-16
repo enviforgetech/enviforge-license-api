@@ -491,9 +491,9 @@ def self_recover(req: SelfRecoverRequest):
 
     # mantém mesma expiração: gera licença nova com dias restantes (ceil)
    new_license = _make_license_with_exp(
-    machine_id=req.new_machine_id,
-    product=req.product,
-    exp=exp_dt
+      machine_id=req.new_machine_id,
+      product=req.product,
+      exp=exp_dt
    )
 
     # remove a chave antiga e grava a nova (para não ficar duas licenças válidas)
