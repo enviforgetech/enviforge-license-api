@@ -146,6 +146,13 @@ def _make_license(machine_id: str, product: str, days: int = 30) -> str:
     token = secrets.token_urlsafe(24)
     return f"ENVIFORGE|{product}|{machine_id}|{exp}|{token}"
 
+def _make_license_with_exp(machine_id: str, product: str, exp: datetime) -> str:
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+
+    token = secrets.token_urlsafe(24)
+    return f"ENVIFORGE|{product}|{machine_id}|{exp.isoformat()}|{token}"
+
 def _parse_license(license_text: str) -> dict:
     parts = license_text.strip().split("|")
     if len(parts) != 5 or parts[0] != "ENVIFORGE":
@@ -483,10 +490,11 @@ def self_recover(req: SelfRecoverRequest):
             )
 
     # mantém mesma expiração: gera licença nova com dias restantes (ceil)
-    seconds_left = (exp_dt - _utcnow()).total_seconds()
-    days_left = max(1, math.ceil(seconds_left / 86400))
-
-    new_license = _make_license(machine_id=req.new_machine_id, product=req.product, days=days_left)
+   new_license = _make_license_with_exp(
+    machine_id=req.new_machine_id,
+    product=req.product,
+    exp=exp_dt
+   )
 
     # remove a chave antiga e grava a nova (para não ficar duas licenças válidas)
     licenses_db.pop(req.license, None)
