@@ -4,8 +4,6 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 import secrets
-import math
-
 app = FastAPI(title="Enviforge License API")
 
 # =========================
@@ -488,13 +486,12 @@ def self_recover(req: SelfRecoverRequest):
                     "cooldown_days": COOLDOWN_DAYS,
                 },
             )
-
-    # mantém mesma expiração: gera licença nova com dias restantes (ceil)
-   new_license = _make_license_with_exp(
-      machine_id=req.new_machine_id,
-      product=req.product,
-      exp=exp_dt
-   )
+    # mantém mesma expiração: gera licença nova com expiração fixa
+    new_license = _make_license_with_exp(
+        machine_id=req.new_machine_id,
+        product=req.product,
+        exp=exp_dt
+    )
 
     # remove a chave antiga e grava a nova (para não ficar duas licenças válidas)
     licenses_db.pop(req.license, None)
