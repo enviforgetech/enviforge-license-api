@@ -444,6 +444,82 @@ def activate(req: ActivateRequest):
     }
 
 # =========================
+# Pull License (NOVO) - revalidar por email
+# =========================
+class PullLicenseRequest(BaseModel):
+    email: str
+    machine_id: str
+    product: str = "vmpt"
+
+@app.post("/pull_license")
+def pull_license(req: PullLicenseRequest):
+    """
+    Puxa licença válida pelo email.
+    - Procura licença paid ativa pelo email + product.
+    - Se machine_id já estiver ativo -> retorna.
+    - Se houver seat disponível -> adiciona.
+    - Se não houver seat -> erro.
+    """
+
+    email_norm = _email_norm(req.email)
+    licenses_db = _load_licenses()
+
+    # procura licença válida desse email
+    for lic_key, rec in licenses_db.items():
+        if rec.get("product") != req.product:
+            continue
+        if _email_norm(rec.get("email")) != email_norm:
+            continue
+
+        exp_dt = _parse_dt(rec.get("expires_at"))
+        if not exp_dt or _utcnow() > exp_dt:
+            continue  # ignorar expiradas
+
+        active_mids = rec.get("active_mids") or []
+        seats_total = int(rec.get("seats_total") or 1)
+
+        # se já está ativo nesta máquina
+        if req.machine_id in active_mids:
+            return {
+                "license": lic_key,
+                "expires_at": exp_dt.isoformat(),
+                "plan": rec.get("plan") or "paid",
+                "license_type": rec.get("license_type") or "paid",
+                "machine_id": req.machine_id,
+            }
+
+        # se ainda há seat disponível
+        if len(active_mids) < seats_total:
+            active_mids.append(req.machine_id)
+            rec["active_mids"] = active_mids
+            licenses_db[lic_key] = rec
+            _save_licenses(licenses_db)
+
+            return {
+                "license": lic_key,
+                "expires_at": exp_dt.isoformat(),
+                "plan": rec.get("plan") or "paid",
+                "license_type": rec.get("license_type") or "paid",
+                "machine_id": req.machine_id,
+            }
+
+        # não há seat disponível
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": "Limite de máquinas atingido para esta licença.",
+                "seats_total": seats_total,
+                "active_mids": active_mids,
+            },
+        )
+
+    raise HTTPException(
+        status_code=404,
+        detail={"message": "Nenhuma licença ativa encontrada para este email."},
+    )
+
+
+# =========================
 # Self Recover (NOVO) - rebind por email + cooldown 7d
 # =========================
 @app.post("/self_recover")
