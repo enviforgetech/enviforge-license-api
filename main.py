@@ -624,7 +624,69 @@ def admin_delete_license(req: AdminDeleteLicenseRequest):
 
     return {"deleted": to_delete, "count": len(to_delete)}
 
-#==========================
+#============admin/delete_by_mid
+
+from pydantic import BaseModel
+from fastapi import HTTPException
+
+class AdminDeleteByMIDRequest(BaseModel):
+    machine_id: str
+    product: str = "vmpt"
+
+@app.post("/admin/delete_by_mid")
+def admin_delete_by_mid(req: AdminDeleteByMIDRequest):
+    mid = (req.machine_id or "").strip()
+    if not mid:
+        raise HTTPException(status_code=422, detail={"message": "machine_id obrigatório"})
+
+    db = _load_licenses()
+    to_delete = []
+
+    for lic_key, rec in db.items():
+        if rec.get("product") != req.product:
+            continue
+
+        # caso 1: a licença guarda machine_id "principal"
+        if (rec.get("machine_id") or "").strip() == mid:
+            to_delete.append(lic_key)
+            continue
+
+        # caso 2: a licença guarda lista de máquinas ativas
+        mids = rec.get("active_mids") or []
+        if mid in mids:
+            to_delete.append(lic_key)
+
+    if not to_delete:
+        raise HTTPException(status_code=404, detail={"message": "Nenhuma licença encontrada para este MID/produto."})
+
+    for k in to_delete:
+        db.pop(k, None)
+
+    _save_licenses(db)
+    return {"deleted": to_delete, "count": len(to_delete), "machine_id": mid}
+
+
+#=======================admin/delete_by_key
+
+class AdminDeleteByKeyRequest(BaseModel):
+    license_key: str
+
+@app.post("/admin/delete_by_key")
+def admin_delete_by_key(req: AdminDeleteByKeyRequest):
+    key = (req.license_key or "").strip()
+    if not key:
+        raise HTTPException(status_code=422, detail={"message": "license_key obrigatório"})
+
+    db = _load_licenses()
+    if key not in db:
+        raise HTTPException(status_code=404, detail={"message": "Licença não encontrada."})
+
+    db.pop(key, None)
+    _save_licenses(db)
+    return {"deleted": key}
+
+
+#========================
 # Admin: resetar trial de um machine_id (uso interno)
 # =========================
 @app.post("/admin/reset_trial")
