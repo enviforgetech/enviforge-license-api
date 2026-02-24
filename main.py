@@ -591,7 +591,40 @@ def self_recover(req: SelfRecoverRequest):
         "machine_id": req.new_machine_id,
     }
 
-# =========================
+# ========= endpoint admin pra deletar
+
+
+from pydantic import BaseModel
+from fastapi import HTTPException
+
+class AdminDeleteLicenseRequest(BaseModel):
+    email: str
+    product: str = "vmpt"
+
+@app.post("/admin/delete_license")
+def admin_delete_license(req: AdminDeleteLicenseRequest):
+    email_norm = _email_norm(req.email)
+    db = _load_licenses()
+
+    to_delete = []
+    for lic_key, rec in db.items():
+        if rec.get("product") != req.product:
+            continue
+        if _email_norm(rec.get("email")) != email_norm:
+            continue
+        to_delete.append(lic_key)
+
+    if not to_delete:
+        raise HTTPException(status_code=404, detail={"message": "Nenhuma licença encontrada para este email/produto."})
+
+    for k in to_delete:
+        db.pop(k, None)
+
+    _save_licenses(db)
+
+    return {"deleted": to_delete, "count": len(to_delete)}
+
+#==========================
 # Admin: resetar trial de um machine_id (uso interno)
 # =========================
 @app.post("/admin/reset_trial")
