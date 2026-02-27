@@ -222,7 +222,7 @@ def _parse_license(license_text: str) -> dict:
 
     return {"product": product, "machine_id": machine_id, "exp": exp, "token": token}
 
-def _record_and_return(trials: dict, machine_id: str, product: str, lic: str, plan: str, license_type: str):
+def _record_and_return(trials: dict, machine_id: str, product: str, lic: str, plan: str, license_type: str, email: str | None = None):
     parsed = _parse_license(lic)
     trials[machine_id] = {
         "product": product,
@@ -243,7 +243,7 @@ def _record_and_return(trials: dict, machine_id: str, product: str, lic: str, pl
         license_key=lic,
         expires_at=parsed["exp"].isoformat(),   # string ISO ou None
         status=db_status,
-        email=None,
+        email=email,
         seats_total=None,
     )
     
@@ -338,7 +338,7 @@ def trial(req: TrialRequest):
         )
 
     lic = _make_license(machine_id=req.machine_id, product=req.product, days=30)
-    return _record_and_return(trials, req.machine_id, req.product, lic, plan="trial", license_type="trial")
+    return _record_and_return(trials, req.machine_id, req.product, lic, plan="trial", license_type="trial", email=req.email)
 
 # =========================
 # Recover (recuperar licença desta máquina)
