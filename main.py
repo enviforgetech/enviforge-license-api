@@ -3,6 +3,9 @@ from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
 import json
 import os
+import urllib.request
+import urllib.error
+import urllib.parse
 import secrets
 app = FastAPI(title="Enviforge License API")
 
@@ -60,6 +63,57 @@ def _parse_dt(ts: str | None) -> datetime | None:
         return dt
     except Exception:
         return None
+# =========================
+# Supabase (REST) - Upsert em public.licenses
+# =========================
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
+def _supabase_enabled() -> bool:
+    return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+
+def _supabase_upsert_license(*, machine_id: str, product: str, license_key: str,
+                             expires_at: str | None, status: str,
+                             email: str | None = None, seats_total: int | None = None) -> None:
+    """
+    UPSERT em public.licenses usando REST (PostgREST) do Supabase.
+    Requer índice/constraint UNIQUE(machine_id, product).
+    Best-effort: se falhar, não interrompe o trial.
+    """
+    if not _supabase_enabled():
+        return
+
+    url = f"{SUPABASE_URL}/rest/v1/licenses?on_conflict=machine_id,product"
+    payload = {
+        "machine_id": machine_id,
+        "product": product,
+        "license_key": license_key,
+        "expires_at": expires_at,   # pode ser None (owner, se quiser)
+        "status": status,           # "trial" | "owner" | "active" etc
+        "email": email,
+        "seats_total": seats_total,
+    }
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url=url,
+        data=data,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "apikey": SUPABASE_SERVICE_ROLE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            "Prefer": "resolution=merge-duplicates",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            # 201/204 normalmente
+            _ = resp.read()
+    except Exception as e:
+        # Não quebra o trial. Só loga no Render.
+        print(f"[WARN] Supabase upsert failed: {e}")
 
 # =========================
 # Owner IDs (via env var)
@@ -178,7 +232,20 @@ def _record_and_return(trials: dict, machine_id: str, product: str, lic: str, pl
         "license_type": license_type,
     }
     _save_trials(trials)
+        # --- grava também no Supabase (UPSERT) ---
+    # status no banco: "trial" ou "owner" (ou "active" no futuro)
+    db_status = "owner" if str(license_type).lower() == "owner" else "trial"
 
+    _supabase_upsert_license(
+        machine_id=machine_id,
+        product=product,
+        license_key=lic,
+        expires_at=parsed["exp"].isoformat(),   # string ISO ou None
+        status=db_status,
+        email=None,
+        seats_total=None,
+    )
+    
     return {
         "license": lic,
         "expires_at": parsed["exp"].isoformat(),
