@@ -154,7 +154,7 @@ def _log_admin(action: str, machine_id: str, detail: dict | None = None) -> None
 
 class AdminResetRequest(BaseModel):
     machine_id: str
-    product: str = "vmpt"
+    product: str = "psicrocalc"
     reason: str | None = None
 
 # =========================
@@ -162,21 +162,22 @@ class AdminResetRequest(BaseModel):
 # =========================
 class TrialRequest(BaseModel):
     machine_id: str
-    product: str = "vmpt"
+    product: str = "psicrocalc"
+    email: str | None = None
 
 class RecoverRequest(BaseModel):
     machine_id: str
-    product: str = "vmpt"
+    product: str = "psicrocalc"
 
 class ValidateRequest(BaseModel):
     machine_id: str
-    product: str = "vmpt"
+    product: str = "psicrocalc"
     license: str
 
 class ActivateRequest(BaseModel):
     machine_id: str
     email: str
-    product: str = "vmpt"
+    product: str = "psicrocalc"
     seats_total: int = 1
     days: int = 365  # default 1 ano (ajuste depois)
 
@@ -184,7 +185,7 @@ class SelfRecoverRequest(BaseModel):
     license: str
     email: str
     new_machine_id: str
-    product: str = "vmpt"
+    product: str = "psicrocalc"
 
 # =========================
 # Helpers de licença
@@ -516,7 +517,7 @@ def activate(req: ActivateRequest):
 class PullLicenseRequest(BaseModel):
     email: str
     machine_id: str
-    product: str = "vmpt"
+    product: str = "psicrocalc"
 
 @app.post("/pull_license")
 def pull_license(req: PullLicenseRequest):
@@ -666,7 +667,7 @@ from fastapi import HTTPException
 
 class AdminDeleteLicenseRequest(BaseModel):
     email: str
-    product: str = "vmpt"
+    product: str = "psicrocalc"
 
 @app.post("/admin/delete_license")
 def admin_delete_license(req: AdminDeleteLicenseRequest):
@@ -698,7 +699,7 @@ from fastapi import HTTPException
 
 class AdminDeleteByMIDRequest(BaseModel):
     machine_id: str
-    product: str = "vmpt"
+    product: str = "psicrocalc"
 
 @app.post("/admin/delete_by_mid")
 def admin_delete_by_mid(req: AdminDeleteByMIDRequest):
