@@ -10,6 +10,108 @@ import secrets
 app = FastAPI(title="Enviforge License API")
 
 # =========================
+# Email (Resend) - transacional
+# =========================
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
+MAIL_FROM = os.getenv("MAIL_FROM", "Enviforge <no-reply@enviforge.com>").strip()
+MAIL_ENABLED = os.getenv("MAIL_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+
+def _mail_should_send() -> bool:
+    return bool(MAIL_ENABLED and RESEND_API_KEY and "@" in MAIL_FROM)
+
+def _resend_send_email(*, to_email: str, subject: str, html: str, text: str) -> None:
+    """Envia e-mail via Resend. Não levanta exceção para o fluxo principal."""
+    if not _mail_should_send():
+        return
+    payload = {
+        "from": MAIL_FROM,
+        "to": [to_email],
+        "subject": subject,
+        "html": html,
+        "text": text,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url="https://api.resend.com/emails",
+        data=data,
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            # força leitura para lançar erros HTTP se houver body de erro
+            resp.read()
+    except Exception as e:
+        # Nunca travar ativação por falha de e-mail
+        print(f"[mail] resend failed to={to_email} subject={subject!r}: {e}")
+
+def _license_email_subject(*, product: str, license_type: str) -> str:
+    lt = (license_type or "").lower()
+    if lt == "trial":
+        return f"Sua licença de teste do {product} (30 dias)"
+    if lt == "owner":
+        return f"Sua licença do {product} está ativa"
+    if lt == "paid":
+        return f"Sua licença do {product} está ativa"
+    if lt == "enterprise":
+        return f"Sua licença empresarial do {product} está ativa"
+    return f"Sua licença do {product}"
+
+def _license_email_bodies(*, product: str, license_type: str, license_key: str, expires_at_iso: str | None) -> tuple[str, str]:
+    """Retorna (html, text). Simples, copy/paste, sem Machine ID."""
+    lt = (license_type or "").upper()
+    exp_line = expires_at_iso or "-"
+    reason = {
+        "TRIAL": "Você solicitou o teste do aplicativo.",
+        "PAID": "Sua licença foi emitida/ativada.",
+        "ENTERPRISE": "Sua licença empresarial foi emitida/ativada.",
+        "OWNER": "Sua licença foi emitida/ativada.",
+    }.get(lt, "Sua licença foi emitida/ativada.")
+
+    html = f"""<!doctype html>
+<html lang='pt-BR'>
+<body style='font-family:Arial,Helvetica,sans-serif; background:#f6f7fb; padding:24px;'>
+  <div style='max-width:640px;margin:0 auto;background:#ffffff;border-radius:12px;padding:24px;border:1px solid #e8e8ee;'>
+    <div style='font-size:18px;font-weight:700;margin-bottom:6px;'>Enviforge | {product}</div>
+    <div style='color:#555;margin-bottom:18px;'>{reason}</div>
+    <div style='background:#f2f3f7;border-radius:10px;padding:14px;margin:16px 0;'>
+      <div style='font-size:13px;color:#666;margin-bottom:6px;'>Tipo</div>
+      <div style='font-size:15px;font-weight:700;'>{lt}</div>
+      <div style='font-size:13px;color:#666;margin:12px 0 6px;'>Validade</div>
+      <div style='font-size:14px;'>{exp_line}</div>
+    </div>
+    <div style='font-size:13px;color:#666;margin:12px 0 6px;'>Sua licença (guarde como backup)</div>
+    <pre style='white-space:pre-wrap;word-break:break-word;background:#0b1020;color:#e8eefc;border-radius:10px;padding:14px;font-size:13px;line-height:1.35;'>{license_key}</pre>
+    <div style='color:#666;font-size:12px;margin-top:16px;'>Este e-mail é automático. Não responda.</div>
+  </div>
+</body>
+</html>"""
+
+    text = (
+        f"Enviforge | {product}\n\n"
+        f"{reason}\n\n"
+        f"Tipo: {lt}\n"
+        f"Validade: {exp_line}\n\n"
+        "Sua licença (guarde como backup):\n"
+        f"{license_key}\n\n"
+        "Este e-mail é automático. Não responda.\n"
+    )
+    return html, text
+
+def _try_send_license_email(*, to_email: str | None, product: str, license_type: str, license_key: str, expires_at_iso: str | None) -> None:
+    if not to_email:
+        return
+    to_email_norm = _email_norm(to_email)
+    if "@" not in to_email_norm:
+        return
+    subject = _license_email_subject(product=product, license_type=license_type)
+    html, txt = _license_email_bodies(product=product, license_type=license_type, license_key=license_key, expires_at_iso=expires_at_iso)
+    _resend_send_email(to_email=to_email_norm, subject=subject, html=html, text=txt)
+
+# =========================
 # Storage simples (JSON local no Render)
 # =========================
 DATA_DIR = os.getenv("DATA_DIR", "/tmp")
@@ -224,32 +326,42 @@ def _parse_license(license_text: str) -> dict:
 
 def _record_and_return(trials: dict, machine_id: str, product: str, lic: str, plan: str, license_type: str, email: str | None = None):
     parsed = _parse_license(lic)
+    exp_iso = parsed["exp"].isoformat()
     trials[machine_id] = {
         "product": product,
         "license": lic,
         "issued_at": trials.get(machine_id, {}).get("issued_at") or _utcnow().isoformat(),
-        "expires_at": parsed["exp"].isoformat(),
+        "expires_at": exp_iso,
         "plan": plan,
         "license_type": license_type,
     }
     _save_trials(trials)
-        # --- grava também no Supabase (UPSERT) ---
+
+    # --- grava também no Supabase (UPSERT) ---
     # status no banco: "trial" ou "owner" (ou "active" no futuro)
     db_status = "owner" if str(license_type).lower() == "owner" else "trial"
-
     _supabase_upsert_license(
         machine_id=machine_id,
         product=product,
         license_key=lic,
-        expires_at=parsed["exp"].isoformat(),   # string ISO ou None
+        expires_at=exp_iso,
         status=db_status,
         email=email,
         seats_total=None,
     )
-    
+
+    # --- e-mail transacional (backup) ---
+    _try_send_license_email(
+        to_email=email,
+        product=product,
+        license_type=str(license_type).lower(),
+        license_key=lic,
+        expires_at_iso=exp_iso,
+    )
+
     return {
         "license": lic,
-        "expires_at": parsed["exp"].isoformat(),
+        "expires_at": exp_iso,
         "machine_id": machine_id,
         "product": product,
         "plan": plan,
@@ -500,6 +612,15 @@ def activate(req: ActivateRequest):
         "last_change_at": None,
     }
     _save_licenses(licenses_db)
+
+    # --- e-mail transacional (backup) ---
+    _try_send_license_email(
+        to_email=req.email,
+        product=req.product,
+        license_type="paid",
+        license_key=lic,
+        expires_at_iso=exp.isoformat(),
+    )
 
     return {
         "status": "activated",
