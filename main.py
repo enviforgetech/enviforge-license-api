@@ -893,32 +893,65 @@ class AdminMailTestRequest(BaseModel):
 
 @app.post("/admin/mail_test")
 def admin_mail_test(
-    req: AdminMailTestRequest,
+    to_email: str,
+    subject: str = "Enviforge Test Email",
     token: str = Query(default=""),
     x_admin_token: str = Header(default="", alias="X-Admin-Token"),
 ):
-    """Endpoint interno para validar entrega de e-mail sem depender do fluxo de trial."""
     provided = (token or x_admin_token).strip()
-    if not ADMIN_TOKEN:
+
+    if not os.getenv("ENVIFORGE_ADMIN_TOKEN"):
         raise HTTPException(status_code=500, detail={"message": "Admin token não configurado no servidor."})
-    if provided != ADMIN_TOKEN:
+
+    if provided != os.getenv("ENVIFORGE_ADMIN_TOKEN"):
         raise HTTPException(status_code=403, detail={"message": "Não autorizado."})
 
-    to_email = _email_norm(req.to_email)
-    if "@" not in to_email:
-        raise HTTPException(status_code=422, detail={"message": "to_email inválido"})
+    if not os.getenv("MAIL_ENABLED") == "true":
+        raise HTTPException(status_code=400, detail={"message": "MAIL_ENABLED não está ativo."})
 
-    subject = (req.subject or "Teste de envio - Enviforge").strip()
-    html = "<div style='font-family:Arial'>Teste de envio de e-mail (Resend) OK.</div>"
-    text = "Teste de envio de e-mail (Resend) OK."
-    _resend_send_email(to_email=to_email, subject=subject, html=html, text=text)
-    return {
-        "ok": True,
-        "mail_enabled": MAIL_ENABLED,
-        "mail_from": MAIL_FROM,
-        "has_api_key": bool(RESEND_API_KEY),
-        "to": to_email,
+    api_key = os.getenv("RESEND_API_KEY")
+    mail_from = os.getenv("MAIL_FROM")
+
+    if not api_key:
+        raise HTTPException(status_code=500, detail={"message": "RESEND_API_KEY não configurada."})
+
+    url = "https://api.resend.com/emails"
+
+    payload = {
+        "from": mail_from,
+        "to": [to_email],
+        "subject": subject,
+        "html": "<h1>Enviforge Test</h1><p>Se você recebeu isso, o envio está funcionando.</p>"
     }
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+    )
+
+    try:
+        with urllib.request.urlopen(req) as response:
+            body = response.read().decode()
+            return {
+                "status": "sent",
+                "resend_response": body
+            }
+
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode()
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Erro ao enviar pelo Resend",
+                "resend_status": e.code,
+                "resend_body": error_body
+            }
+        )
 
 
 #========================
