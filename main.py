@@ -460,7 +460,56 @@ def trial(req: TrialRequest):
         )
 
     lic = _make_license(machine_id=req.machine_id, product=req.product, days=30)
-    return _record_and_return(trials, req.machine_id, req.product, lic, plan="trial", license_type="trial", email=req.email)
+
+    resp = _record_and_return(
+        trials,
+        req.machine_id,
+        req.product,
+        lic,
+        plan="trial",
+        license_type="trial",
+        email=req.email
+    )
+    
+    # Envio de e-mail (best effort): NÃO pode quebrar a emissão da licença
+    try:
+        mail_enabled = (os.getenv("MAIL_ENABLED") or "").strip().lower() == "true"
+        mail_from = (os.getenv("MAIL_FROM") or "").strip()
+        resend_api_key = (os.getenv("RESEND_API_KEY") or "").strip()
+    
+        if mail_enabled and mail_from and resend_api_key and req.email:
+            r = requests.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {resend_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "from": mail_from,
+                    "to": [req.email],
+                    "subject": "Sua licença Trial Enviforge",
+                    "text": (
+                        "Enviforge — licença Trial\n\n"
+                        f"Licença: {resp.get('license')}\n"
+                        f"Validade: {resp.get('expires_at')}\n"
+                        f"Produto: {resp.get('product')}\n"
+                    ),
+                },
+                timeout=20,
+            )
+    
+            # opcional: guardar retorno pra debug sem atrapalhar o app
+            resp["mail"] = {"status": r.status_code}
+            try:
+                resp["mail"]["body"] = r.json()
+            except Exception:
+                resp["mail"]["body"] = r.text
+    
+    except Exception as e:
+        resp["mail"] = {"error": str(e)}
+    
+    return resp
+    
 
 # =========================
 # Recover (recuperar licença desta máquina)
