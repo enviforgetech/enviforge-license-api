@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Header, Query, Request
 from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 import requests
 import json
 import os
@@ -14,6 +15,7 @@ app = FastAPI(title="Enviforge License API")
 # =========================
 # Email (Resend) - transacional
 # =========================
+
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
 MAIL_FROM = os.getenv("MAIL_FROM", "Enviforge <no-reply@enviforge.com>").strip()
 MAIL_ENABLED = os.getenv("MAIL_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
@@ -299,6 +301,12 @@ class SelfRecoverRequest(BaseModel):
     new_machine_id: str
     product: str = "psicrocalc"
 
+class PullLicenseMasterRequest(BaseModel):
+    license: str
+    machine_id: str
+    activated_by: Optional[str] = None  # e-mail TI opcional
+    product: str = "psicrocalc"
+
 # =========================
 # Helpers de licença
 # =========================
@@ -510,10 +518,10 @@ def trial(req: TrialRequest):
     
     return resp
     
-
 # =========================
 # Recover (recuperar licença desta máquina)
 # =========================
+
 @app.post("/recover_license")
 def recover_license(req: RecoverRequest):
     """
@@ -558,6 +566,7 @@ def recover_license(req: RecoverRequest):
 # =========================
 # Validate
 # =========================
+
 @app.post("/validate")
 def validate(req: ValidateRequest):
     """
@@ -694,6 +703,7 @@ def activate(req: ActivateRequest):
 # =========================
 # Pull License (NOVO) - revalidar por email
 # =========================
+
 class PullLicenseRequest(BaseModel):
     email: str
     machine_id: str
@@ -765,11 +775,112 @@ def pull_license(req: PullLicenseRequest):
         status_code=404,
         detail={"message": "Nenhuma licença ativa encontrada para este email."},
     )
+    
+#===========================
 
+@app.post("/pull_license_master")
+def pull_license_master(req: PullLicenseMasterRequest):
+    """
+    Empresa (B2B) - ativar/revalidar por MASTER KEY.
+    - Não depende de email para achar licença.
+    - Email 'activated_by' é opcional (auditoria + avisos).
+    - Consome seats por machine_id.
+    - Registra evento em license_activations (Supabase).
+    - Envia e-mail para financeiro + TI (se informado).
+    """
+
+    lic_key = (req.license or "").strip()
+    if not lic_key:
+        raise HTTPException(status_code=422, detail={"message": "license (master key) é obrigatório."})
+
+    activated_by_norm = _email_norm(req.activated_by) if req.activated_by else None
+
+    licenses_db = _load_licenses()
+    rec = licenses_db.get(lic_key)
+
+    if not rec:
+        raise HTTPException(status_code=404, detail={"message": "Licença não encontrada."})
+
+    if rec.get("product") != req.product:
+        raise HTTPException(status_code=404, detail={"message": "Licença não encontrada para este produto."})
+
+    exp_dt = _parse_dt(rec.get("expires_at"))
+    if not exp_dt or _utcnow() > exp_dt:
+        raise HTTPException(status_code=403, detail={"message": "Licença expirada."})
+
+    active_mids = rec.get("active_mids") or []
+    seats_total = int(rec.get("seats_total") or 1)
+
+    # Já ativo nesta máquina -> só retorna
+    if req.machine_id in active_mids:
+        return {
+            "license": lic_key,
+            "expires_at": exp_dt.isoformat(),
+            "plan": rec.get("plan") or "paid",
+            "license_type": rec.get("license_type") or "paid",
+            "machine_id": req.machine_id,
+            "seats_total": seats_total,
+            "seats_used": len(active_mids),
+        }
+
+    # Tem seat disponível -> ativa
+    if len(active_mids) < seats_total:
+        active_mids.append(req.machine_id)
+        rec["active_mids"] = active_mids
+        rec["last_change_at"] = _utcnow().isoformat()
+
+        # opcional: guardar o último TI que ativou (útil pra aviso de vencimento depois)
+        if activated_by_norm:
+            rec["last_activated_by"] = activated_by_norm
+
+        licenses_db[lic_key] = rec
+        _save_licenses(licenses_db)
+
+        # Log no Supabase (não derruba ativação se falhar)
+        _try_log_activation_event(
+            license_key=lic_key,
+            machine_id=req.machine_id,
+            activated_by=activated_by_norm,
+            event="seat_consumed",
+        )
+
+        # E-mails: financeiro sempre, TI se informado
+        billing_email = rec.get("email")  # financeiro (comprador)
+        _try_send_activation_notice(
+            billing_email=billing_email,
+            activated_by=activated_by_norm,
+            product=req.product,
+            license_key=lic_key,
+            machine_id=req.machine_id,
+            expires_at_iso=exp_dt.isoformat(),
+            seats_total=seats_total,
+            seats_used=len(active_mids),
+        )
+
+        return {
+            "license": lic_key,
+            "expires_at": exp_dt.isoformat(),
+            "plan": rec.get("plan") or "paid",
+            "license_type": rec.get("license_type") or "paid",
+            "machine_id": req.machine_id,
+            "seats_total": seats_total,
+            "seats_used": len(active_mids),
+        }
+
+    # Sem seat
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "message": "Limite de máquinas atingido para esta licença.",
+            "seats_total": seats_total,
+            "active_mids": active_mids,
+        },
+    )
 
 # =========================
 # Self Recover (NOVO) - rebind por email + cooldown 7d
 # =========================
+
 @app.post("/self_recover")
 def self_recover(req: SelfRecoverRequest):
     """
@@ -841,10 +952,6 @@ def self_recover(req: SelfRecoverRequest):
 
 # ========= endpoint admin pra deletar
 
-
-from pydantic import BaseModel
-from fastapi import HTTPException
-
 class AdminDeleteLicenseRequest(BaseModel):
     email: str
     product: str = "psicrocalc"
@@ -913,7 +1020,6 @@ def admin_delete_by_mid(req: AdminDeleteByMIDRequest):
     _save_licenses(db)
     return {"deleted": to_delete, "count": len(to_delete), "machine_id": mid}
 
-
 #=======================admin/delete_by_key
 
 class AdminDeleteByKeyRequest(BaseModel):
@@ -932,8 +1038,6 @@ def admin_delete_by_key(req: AdminDeleteByKeyRequest):
     db.pop(key, None)
     _save_licenses(db)
     return {"deleted": key}
-
-
 # ========================
 # Admin: teste de envio de e-mail (Resend)
 # ========================
@@ -1019,9 +1123,6 @@ def admin_mail_test(payload: MailTestIn, request: Request, x_admin_token: str | 
             "resend_body": err_body,
         },
     )
-
-
-
 #========================
 # Admin: resetar trial de um machine_id (uso interno)
 # =========================
