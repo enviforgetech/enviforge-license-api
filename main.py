@@ -185,12 +185,14 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
 def _try_log_activation_event(license_key: str, machine_id: str, activated_by: str | None, event: str):
+    print("LOG ACTIVATION EVENT DISPARADO")
     """
     Registra evento de ativação no Supabase.
     Não derruba a API se falhar.
     """
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         print("WARN: Supabase não configurado.")
+    
         return
 
     try:
@@ -211,7 +213,9 @@ def _try_log_activation_event(license_key: str, machine_id: str, activated_by: s
 
         # Remove campos None
         payload = {k: v for k, v in payload.items() if v is not None}
-
+        print("Enviando para Supabase:", url)
+        print("Headers:", headers)
+        print("Payload:", payload)
         r = requests.post(url, headers=headers, json=payload, timeout=10)
 
         if r.status_code not in (200, 201, 204):
