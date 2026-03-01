@@ -1,12 +1,14 @@
-from fastapi import FastAPI, HTTPException, Header, Query
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Header, Query, Request
+from pydantic import BaseModel, EmailStr
 from datetime import datetime, timedelta, timezone
+import requests
 import json
 import os
 import urllib.request
 import urllib.error
 import urllib.parse
 import secrets
+
 app = FastAPI(title="Enviforge License API")
 
 # =========================
@@ -886,72 +888,89 @@ def admin_delete_by_key(req: AdminDeleteByKeyRequest):
 # ========================
 # Admin: teste de envio de e-mail (Resend)
 # ========================
-class AdminMailTestRequest(BaseModel):
-    to_email: str
-    subject: str | None = None
+class MailTestIn(BaseModel):
+    to_email: EmailStr
+    subject: str = "Teste Enviforge"
 
+def _get_admin_token_from_request(request: Request, x_admin_token: str | None) -> str | None:
+    # Aceita token via header X-Admin-Token ou query ?token=...
+    if x_admin_token:
+        return x_admin_token.strip()
+    q = request.query_params.get("token")
+    return q.strip() if q else None
 
 @app.post("/admin/mail_test")
-def admin_mail_test(
-    to_email: str,
-    subject: str = "Enviforge Test Email",
-    token: str = Query(default=""),
-    x_admin_token: str = Header(default="", alias="X-Admin-Token"),
-):
-    provided = (token or x_admin_token).strip()
+def admin_mail_test(payload: MailTestIn, request: Request, x_admin_token: str | None = Header(default=None, alias="X-Admin-Token")):
+    server_token = (os.getenv("ADMIN_TOKEN") or "").strip()
+    if not server_token:
+        raise HTTPException(status_code=500, detail="Admin token não configurado no servidor.")
 
-    if not os.getenv("ENVIFORGE_ADMIN_TOKEN"):
-        raise HTTPException(status_code=500, detail={"message": "Admin token não configurado no servidor."})
+    provided = _get_admin_token_from_request(request, x_admin_token)
+    if not provided or provided != server_token:
+        raise HTTPException(status_code=401, detail="Token admin inválido.")
 
-    if provided != os.getenv("ENVIFORGE_ADMIN_TOKEN"):
-        raise HTTPException(status_code=403, detail={"message": "Não autorizado."})
+    mail_enabled = (os.getenv("MAIL_ENABLED") or "").strip().lower() == "true"
+    mail_from = (os.getenv("MAIL_FROM") or "").strip()
+    resend_api_key = (os.getenv("RESEND_API_KEY") or "").strip()
 
-    if not os.getenv("MAIL_ENABLED") == "true":
-        raise HTTPException(status_code=400, detail={"message": "MAIL_ENABLED não está ativo."})
+    if not mail_enabled:
+        raise HTTPException(status_code=400, detail="MAIL_ENABLED está desativado.")
+    if not mail_from:
+        raise HTTPException(status_code=500, detail="MAIL_FROM não configurado.")
+    if not resend_api_key:
+        raise HTTPException(status_code=500, detail="RESEND_API_KEY não configurada.")
 
-    api_key = os.getenv("RESEND_API_KEY")
-    mail_from = os.getenv("MAIL_FROM")
-
-    if not api_key:
-        raise HTTPException(status_code=500, detail={"message": "RESEND_API_KEY não configurada."})
-
-    url = "https://api.resend.com/emails"
-
-    payload = {
-        "from": mail_from,
-        "to": [to_email],
-        "subject": subject,
-        "html": "<h1>Enviforge Test</h1><p>Se você recebeu isso, o envio está funcionando.</p>"
+    resend_url = "https://api.resend.com/emails"
+    headers = {
+        "Authorization": f"Bearer {resend_api_key}",
+        "Content-Type": "application/json",
     }
 
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
-    )
+    data = {
+        "from": mail_from,                # ex: Enviforge <no-reply@enviforge.com>
+        "to": [payload.to_email],
+        "subject": payload.subject,
+        "text": "Enviforge — teste de envio (mail_test).",
+    }
 
     try:
-        with urllib.request.urlopen(req) as response:
-            body = response.read().decode()
-            return {
-                "status": "sent",
-                "resend_response": body
-            }
+        r = requests.post(resend_url, headers=headers, json=data, timeout=20)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"error": "Falha ao chamar Resend.", "exception": str(e)})
 
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode()
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "message": "Erro ao enviar pelo Resend",
-                "resend_status": e.code,
-                "resend_body": error_body
-            }
-        )
+    # Sempre devolver a verdade nua e crua
+    if 200 <= r.status_code < 300:
+        try:
+            body = r.json()
+        except Exception:
+            body = {"raw": r.text}
+        return {
+            "ok": True,
+            "mail_enabled": True,
+            "mail_from": mail_from,
+            "to": payload.to_email,
+            "resend_status": r.status_code,
+            "resend_body": body,           # aqui deve vir o "id"
+        }
+
+    # Erro real do Resend (sem chute)
+    try:
+        err_body = r.json()
+    except Exception:
+        err_body = {"raw": r.text}
+
+    raise HTTPException(
+        status_code=502,
+        detail={
+            "ok": False,
+            "mail_enabled": True,
+            "mail_from": mail_from,
+            "to": payload.to_email,
+            "resend_status": r.status_code,
+            "resend_body": err_body,
+        },
+    )
+
 
 
 #========================
