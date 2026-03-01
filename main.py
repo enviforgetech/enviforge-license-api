@@ -840,17 +840,17 @@ def pull_license_master(req: PullLicenseMasterRequest):
 
 
         # E-mails: financeiro sempre, TI se informado
-        billing_email = rec.get("email")  # financeiro (comprador)
-        _try_send_activation_notice(
-            billing_email=billing_email,
-            activated_by=activated_by_norm,
-            product=req.product,
-            license_key=lic_key,
-            machine_id=req.machine_id,
-            expires_at_iso=exp_dt.isoformat(),
-            seats_total=seats_total,
-            seats_used=len(active_mids),
-        )
+       # billing_email = rec.get("email")  # financeiro (comprador)
+        #_try_send_activation_notice(
+         #   billing_email=billing_email,
+          #  activated_by=activated_by_norm,
+           # product=req.product,
+            #license_key=lic_key,
+            #machine_id=req.machine_id,
+            #expires_at_iso=exp_dt.isoformat(),
+            #seats_total=seats_total,
+            #seats_used=len(active_mids),
+       # )
 
         return {
             "license": lic_key,
