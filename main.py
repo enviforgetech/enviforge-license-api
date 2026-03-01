@@ -178,6 +178,50 @@ def _parse_dt(ts: str | None) -> datetime | None:
     except Exception:
         return None
 # =========================
+# Supabase - Log de ativação
+# =========================
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+
+def _try_log_activation_event(license_key: str, machine_id: str, activated_by: str | None, event: str):
+    """
+    Registra evento de ativação no Supabase.
+    Não derruba a API se falhar.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        print("WARN: Supabase não configurado.")
+        return
+
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/license_activations"
+        headers = {
+            "apikey": SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        }
+
+        payload = {
+            "license_key": license_key,
+            "machine_id": machine_id,
+            "activated_by": activated_by,
+            "event": event,
+        }
+
+        # Remove campos None
+        payload = {k: v for k, v in payload.items() if v is not None}
+
+        r = requests.post(url, headers=headers, json=payload, timeout=10)
+
+        if r.status_code not in (200, 201, 204):
+            print("WARN: Supabase log falhou:", r.status_code, r.text)
+
+    except Exception as e:
+        print("WARN: Supabase log exception:", repr(e))
+
+
+# =========================
 # Supabase (REST) - Upsert em public.licenses
 # =========================
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
@@ -752,6 +796,13 @@ def pull_license(req: PullLicenseRequest):
             rec["active_mids"] = active_mids
             licenses_db[lic_key] = rec
             _save_licenses(licenses_db)
+
+            _try_log_activation_event(
+                license_key=lic_key,
+                machine_id=req.machine_id,
+                activated_by=activated_by_norm,
+                event="seat_consumed",
+            )
 
             return {
                 "license": lic_key,
