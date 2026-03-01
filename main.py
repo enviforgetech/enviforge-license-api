@@ -837,12 +837,7 @@ def pull_license_master(req: PullLicenseMasterRequest):
         _save_licenses(licenses_db)
 
         # Log no Supabase (não derruba ativação se falhar)
-        _try_log_activation_event(
-            license_key=lic_key,
-            machine_id=req.machine_id,
-            activated_by=activated_by_norm,
-            event="seat_consumed",
-        )
+
 
         # E-mails: financeiro sempre, TI se informado
         billing_email = rec.get("email")  # financeiro (comprador)
